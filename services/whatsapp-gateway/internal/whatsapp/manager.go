@@ -28,6 +28,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/db"
+	xgrpc "github.com/alan/ia-pipeline/whatsapp-gateway/internal/grpc"
+	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/grpc/botpb"
 	xkafka "github.com/alan/ia-pipeline/whatsapp-gateway/internal/kafka"
 	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/telemetry"
 )
@@ -54,6 +56,7 @@ type Manager struct {
 	cfg       Config
 	store     *db.Store
 	producer  *xkafka.Producer
+	botClient *xgrpc.BotClient // nil when BOT_GRPC_ADDR is not set
 	container *sqlstore.Container
 	logger    zerolog.Logger
 
@@ -71,7 +74,7 @@ type Config struct {
 
 // New builds a Manager. The sqlstore container is the whatsmeow device store backed
 // by the same Postgres instance (separate tables, prefixed whatsmeow_).
-func New(ctx context.Context, cfg Config, st *db.Store, producer *xkafka.Producer, logger zerolog.Logger) (*Manager, error) {
+func New(ctx context.Context, cfg Config, st *db.Store, producer *xkafka.Producer, botClient *xgrpc.BotClient, logger zerolog.Logger) (*Manager, error) {
 	dbLog := waLog.Stdout("whatsmeow-store", "WARN", true)
 	container, err := sqlstore.New(ctx, "pgx", cfg.DatabaseURL, dbLog)
 	if err != nil {
@@ -82,6 +85,7 @@ func New(ctx context.Context, cfg Config, st *db.Store, producer *xkafka.Produce
 		cfg:       cfg,
 		store:     st,
 		producer:  producer,
+		botClient: botClient,
 		container: container,
 		logger:    logger,
 		conns:     make(map[int64]*ConnState),
@@ -230,7 +234,9 @@ func (m *Manager) eventHandler(_ context.Context, connID int64) func(any) {
 	}
 }
 
-// onMessage forwards an inbound text message to Kafka with a deterministic event id.
+// onMessage handles an inbound text message:
+//  1. Logs to DB and publishes to Kafka inbound topic (analytics).
+//  2. Calls the LLM bot via gRPC (hot path) and sends the reply over WhatsApp.
 func (m *Manager) onMessage(ctx context.Context, connID int64, e *events.Message) {
 	body := extractText(e)
 	if body == "" {
@@ -245,7 +251,16 @@ func (m *Manager) onMessage(ctx context.Context, connID int64, e *events.Message
 
 	m.addBytesIn(connID, int64(bytes))
 
-	msg := xkafka.InboundMessage{
+	logEntry := m.logger.With().
+		Str("trace_id", traceID).Str("event_id", eventID).
+		Int64("conn", connID).Str("jid", chatJID).Logger()
+
+	if err := m.store.LogMessage(ctx, eventID, connID, chatJID, "inbound", body, bytes, traceID); err != nil {
+		logEntry.Error().Err(err).Msg("log inbound message")
+	}
+
+	// Publish to Kafka for analytics (non-blocking for the response path).
+	kafkaMsg := xkafka.InboundMessage{
 		EventID:      eventID,
 		TraceID:      traceID,
 		PodID:        m.cfg.PodID,
@@ -256,19 +271,36 @@ func (m *Manager) onMessage(ctx context.Context, connID int64, e *events.Message
 		Bytes:        bytes,
 		Timestamp:    tsMs,
 	}
-
-	logEntry := m.logger.With().
-		Str("trace_id", traceID).Str("event_id", eventID).
-		Int64("conn", connID).Str("jid", chatJID).Logger()
-
-	if err := m.store.LogMessage(ctx, eventID, connID, chatJID, "inbound", body, bytes, traceID); err != nil {
-		logEntry.Error().Err(err).Msg("log inbound message")
+	if err := m.producer.PublishInbound(ctx, m.cfg.TopicInbound, kafkaMsg); err != nil {
+		logEntry.Error().Err(err).Msg("publish inbound to kafka (analytics)")
+	} else {
+		logEntry.Info().Int("bytes", bytes).Msg("inbound message published to kafka")
 	}
-	if err := m.producer.PublishInbound(ctx, m.cfg.TopicInbound, msg); err != nil {
-		logEntry.Error().Err(err).Msg("publish inbound to kafka")
+
+	// gRPC hot path: call the bot directly and send the reply.
+	if m.botClient == nil {
+		logEntry.Warn().Msg("no bot gRPC client configured; reply skipped")
 		return
 	}
-	logEntry.Info().Int("bytes", bytes).Msg("inbound message published")
+	reply, err := m.botClient.Process(ctx, &botpb.InboundMessage{
+		EventId:      eventID,
+		TraceId:      traceID,
+		ConnectionId: connID,
+		Jid:          chatJID,
+		SenderJid:    sender,
+		Body:         body,
+	})
+	if err != nil {
+		logEntry.Error().Err(err).Msg("bot.Process gRPC failed")
+		return
+	}
+	if reply == "" {
+		logEntry.Warn().Msg("bot returned empty reply; not sending")
+		return
+	}
+	if err := m.SendText(ctx, connID, chatJID, reply, traceID, eventID); err != nil {
+		logEntry.Error().Err(err).Msg("send WhatsApp reply")
+	}
 }
 
 // SendText sends a text message via the connection identified by connID.

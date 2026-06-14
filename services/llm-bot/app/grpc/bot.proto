@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package bot;
+
+option go_package = "github.com/alan/ia-pipeline/whatsapp-gateway/internal/grpc/botpb";
+
+service Bot {
+  rpc Process(InboundMessage) returns (stream ReplyChunk);
+}
+
+message InboundMessage {
+  string event_id      = 1;
+  string trace_id      = 2;
+  int64  connection_id = 3;
+  string jid           = 4;
+  string sender_jid    = 5;
+  string body          = 6;
+}
+
+message ReplyChunk {
+  string text = 1;
+  bool   done = 2;
+}

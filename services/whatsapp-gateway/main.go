@@ -16,15 +16,13 @@ import (
 
 	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/config"
 	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/db"
+	xgrpc "github.com/alan/ia-pipeline/whatsapp-gateway/internal/grpc"
 	xkafka "github.com/alan/ia-pipeline/whatsapp-gateway/internal/kafka"
 	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/server"
 	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/telemetry"
 	"github.com/alan/ia-pipeline/whatsapp-gateway/internal/whatsapp"
 )
 
-// migrationsFS embeds the SQL migrations. Embedding from the main package (where
-// migrations/ is a subdirectory) is valid; embedding via ../ is not.
-//
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
@@ -38,7 +36,6 @@ func main() {
 	logger = logger.With().Str("pod_id", cfg.PodID).Logger()
 	logger.Info().Msg("whatsapp-gateway starting")
 
-	// Root context cancelled on SIGINT/SIGTERM for graceful shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -50,12 +47,25 @@ func main() {
 	}
 	defer store.Close()
 
-	// --- Kafka producer (idempotent) ---
+	// --- Kafka producer (idempotent, analytics) ---
 	producer, err := xkafka.NewProducer(cfg.KafkaBrokers, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("init kafka producer")
 	}
 	defer producer.Close(context.Background())
+
+	// --- gRPC client to LLM bot (hot path) ---
+	var botClient *xgrpc.BotClient
+	if cfg.BotGRPCAddr != "" {
+		botClient, err = xgrpc.NewBotClient(cfg.BotGRPCAddr)
+		if err != nil {
+			logger.Fatal().Err(err).Str("addr", cfg.BotGRPCAddr).Msg("init bot gRPC client")
+		}
+		defer botClient.Close()
+		logger.Info().Str("addr", cfg.BotGRPCAddr).Msg("bot gRPC client ready")
+	} else {
+		logger.Warn().Msg("BOT_GRPC_ADDR not set; replies disabled")
+	}
 
 	// --- WhatsApp manager ---
 	manager, err := whatsapp.New(ctx, whatsapp.Config{
@@ -63,28 +73,23 @@ func main() {
 		TopicInbound: cfg.TopicInbound,
 		TopicEvents:  cfg.TopicEvents,
 		DatabaseURL:  cfg.DatabaseURL,
-	}, store, producer, logger)
+	}, store, producer, botClient, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("init whatsapp manager")
 	}
 
-	// --- Outbound consumer: handle send/disconnect commands ---
+	// --- Outbound Kafka consumer (disconnect commands only) ---
 	handler := func(hctx context.Context, msg xkafka.OutboundMessage, traceID string) error {
 		if traceID == "" {
 			traceID = msg.TraceID
 		}
-		switch msg.Command {
-		case "disconnect":
-			if !manager.Owns(msg.ConnectionID) {
-				return nil // another pod owns it; ignore (will be picked up there)
-			}
-			return manager.Disconnect(hctx, msg.ConnectionID)
-		default: // "" or "send"
-			if !manager.Owns(msg.ConnectionID) {
-				return nil // not ours; let the owning pod handle it
-			}
-			return manager.SendText(hctx, msg.ConnectionID, msg.JID, msg.Body, traceID, msg.EventID)
+		if msg.Command != "disconnect" {
+			return nil // send commands now flow via gRPC; ignore on Kafka
 		}
+		if !manager.Owns(msg.ConnectionID) {
+			return nil
+		}
+		return manager.Disconnect(hctx, msg.ConnectionID)
 	}
 	consumer, err := xkafka.NewConsumer(cfg.KafkaBrokers, cfg.ConsumerGroup, cfg.TopicOutbound, handler, logger)
 	if err != nil {
@@ -102,7 +107,6 @@ func main() {
 	// --- HTTP server ---
 	httpSrv := server.New(cfg.HTTPAddr, cfg.PodID, manager, logger)
 
-	// Launch background loops.
 	go claimer.Run(ctx)
 	go consumer.Run(ctx)
 	go func() {
@@ -112,12 +116,9 @@ func main() {
 	}()
 
 	logger.Info().Msg("whatsapp-gateway running")
-
-	// Block until shutdown signal.
 	<-ctx.Done()
 	logger.Info().Msg("shutdown signal received; cleaning up")
 
-	// Graceful shutdown with a bounded deadline.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 

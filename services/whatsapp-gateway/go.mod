@@ -5,9 +5,11 @@ go 1.25.0
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.6.0
+	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/rs/zerolog v1.35.1
 	github.com/twmb/franz-go v1.17.1
 	go.mau.fi/whatsmeow v0.0.0-20260611094716-089932318bc2
+	google.golang.org/grpc v1.64.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -22,7 +24,6 @@ require (
 	github.com/klauspost/compress v1.17.8 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mdp/qrterminal/v3 v3.2.1 // indirect
 	github.com/petermattis/goid v0.0.0-20260330135022-df67b199bc81 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.8.0 // indirect
@@ -36,5 +37,6 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240318140521-94a12d6c2237 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )

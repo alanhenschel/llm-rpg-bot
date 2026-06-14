@@ -26,6 +26,10 @@ type Config struct {
 
 	HTTPAddr string
 
+	// gRPC address of the LLM bot (hot path).
+	// Empty string disables the gRPC client (Kafka-only fallback mode).
+	BotGRPCAddr string
+
 	// Connection claiming tuning.
 	ClaimBatchSize    int
 	HeartbeatInterval time.Duration
@@ -57,6 +61,7 @@ func Load() (*Config, error) {
 		TopicEvents:       getenv("TOPIC_EVENTS", "whatsapp.events"),
 		ConsumerGroup:     getenv("KAFKA_CONSUMER_GROUP", "whatsapp-gateway"),
 		HTTPAddr:          getenv("HTTP_ADDR", ":8080"),
+		BotGRPCAddr:       getenv("BOT_GRPC_ADDR", ""),
 		ClaimBatchSize:    getenvInt("CLAIM_BATCH_SIZE", 10),
 		HeartbeatInterval: getenvDuration("HEARTBEAT_INTERVAL", 10*time.Second),
 		StalenessWindow:   getenvDuration("STALENESS_WINDOW", 30*time.Second),

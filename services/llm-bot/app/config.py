@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 50
 
+    # gRPC server (hot path from gateway)
+    grpc_port: int = 50051
+
     # API
     http_host: str = "0.0.0.0"
     http_port: int = 8000

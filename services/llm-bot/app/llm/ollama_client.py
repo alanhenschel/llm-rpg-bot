@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -86,6 +88,36 @@ class OllamaClient:
             "Sorry, I'm having trouble reaching my knowledge engine right now. "
             "Please try again in a moment."
         )
+
+    async def stream(self, prompt: str, *, trace_id: str = "", event_id: str = "") -> AsyncIterator[str]:
+        """Stream tokens from Ollama /api/generate as they are produced."""
+        payload = {
+            "model": settings.ollama_model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {"temperature": 0.3},
+        }
+        try:
+            async with self._client.stream("POST", "/api/generate", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    token = data.get("response", "")
+                    if token:
+                        yield token
+                    if data.get("done"):
+                        return
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.error(
+                "ollama stream failed; falling back to empty reply",
+                extra=log_extra(trace_id, event_id, error=str(exc)),
+            )
+            yield (
+                "Sorry, I'm having trouble reaching my knowledge engine right now. "
+                "Please try again in a moment."
+            )
 
     async def ensure_model(self) -> bool:
         """Best-effort check/pull of the configured model. Non-fatal on failure."""
