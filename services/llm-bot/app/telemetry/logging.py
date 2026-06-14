@@ -17,20 +17,21 @@ class _SchemaFormatter(jsonlogger.JsonFormatter):
     """Rename/standardize fields to the shared pipeline schema."""
 
     def __init__(self, service_name: str) -> None:
-        super().__init__(
-            "%(timestamp)s %(level)s %(service)s %(message)s",
-            rename_fields={"levelname": "level", "asctime": "timestamp"},
-            timestamp=True,
-        )
+        # Use a minimal format string; all fields are injected in add_fields.
+        super().__init__("%(message)s", timestamp=True)
         self._service_name = service_name
 
     def add_fields(self, log_record, record, message_dict):  # noqa: ANN001
         super().add_fields(log_record, record, message_dict)
         log_record["service"] = self._service_name
-        if "level" not in log_record:
-            log_record["level"] = record.levelname.lower()
-        else:
-            log_record["level"] = str(log_record["level"]).lower()
+        # Normalize level: pythonjsonlogger or grpc may emit records without
+        # the standard `levelname` attribute — guard defensively.
+        raw_level = getattr(record, "levelname", None) or log_record.get("levelname", "INFO")
+        log_record["level"] = str(raw_level).lower()
+        log_record.pop("levelname", None)
+        # Normalize timestamp field name.
+        if "asctime" in log_record:
+            log_record["timestamp"] = log_record.pop("asctime")
 
 
 def configure(service_name: str, level: str = "INFO") -> None:
