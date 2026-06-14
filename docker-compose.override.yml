@@ -1,0 +1,52 @@
+# Replaces bitnami images unavailable in some registries.
+# Merged automatically by docker compose — no Makefile changes needed.
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    # Base file mounts kafka-data at /bitnami/kafka (the bitnami data path).
+    # confluentinc stores data at /var/lib/kafka/data — remap so the named
+    # volume points at the right location for this image.
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    # confluentinc images ship `kafka-topics` (no .sh); the base healthcheck
+    # uses `kafka-topics.sh`, which does not exist here. Override with the
+    # confluent binary name so the container can report healthy.
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # redis: host port is controlled via REDIS_PORT=6380 in .env
+  # to avoid conflict with rate-limiter_redis_1 on 6379.
+
+  # Creates the three Kafka topics on every stack start (idempotent: --if-not-exists).
+  # Needed because the Go producer uses enable.idempotence=true which suppresses
+  # Kafka's broker-side auto-create, so topics must exist before services start.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic whatsapp.messages.inbound  --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic whatsapp.messages.outbound --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic whatsapp.events            --partitions 3 --replication-factor 1
+        echo "kafka topics ready"
+    restart: "no"

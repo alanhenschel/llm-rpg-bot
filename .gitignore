@@ -1,0 +1,30 @@
+# Env
+.env
+
+# Go
+services/whatsapp-gateway/gateway
+*.test
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+services/management/frontend/dist/
+
+# Data / models / vector store
+**/data/chroma/
+**/data/hf/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Claude Code agent files (local only)
+.claude/
